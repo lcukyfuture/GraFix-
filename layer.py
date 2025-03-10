@@ -49,7 +49,6 @@ class SimplifiedAttention(nn.Module):
         assert embed_dim == self.embed_dim, "Embedding dimension mismatch."
         assert attn_output_weights.size(1) == self.num_heads
 
-        t1 = timer()
         v_proj = F.linear(value, self.in_proj_weight, self.in_proj_bias).view(tgt_len, bsz, self.num_heads, -1)
         #[num_node, bsz, num_heads, dim]
 
