@@ -146,8 +146,6 @@ class GraphDataset(object):
             max_len = max(len(g.x) for g in batch)
 
             padded_x = pad_sequence([g.x for g in batch], batch_first=True, padding_value=0)
-            
-            adj_matrices = pad_sequence([torch.nn.functional.pad(g.adj,[0,max_len-len(g.x)]) for g in batch], batch_first=True, padding_value=0)
             mask =  pad_sequence([torch.zeros_like(g.x[:,0]) for g in batch], batch_first=True, padding_value=1).bool()
             
             labels = [g.y for g in batch]
@@ -158,12 +156,6 @@ class GraphDataset(object):
             # else use a dense tensor
             pos_enc = None
             use_pe = hasattr(batch[0], 'pe') and batch[0].pe is not None
-            if use_pe:
-                if not batch[0].pe.is_sparse:               
-                    # pos_enc = torch.stack([torch.nn.functional.pad(g.pe,[0,max_len-len(g.x),0,max_len-len(g.x)]) for g in batch],0)
-                    pos_enc = pad_sequence([torch.nn.functional.pad(g.pe.transpose(0,1),[0,max_len-len(g.x)]) for g in batch], batch_first=True, padding_value=0).transpose(1,2)
-                else:
-                    print("Not implemented yet!")
 
             lap_pos_enc = None
             use_lap_pe = hasattr(batch[0], 'lap_pe') and batch[0].lap_pe is not None
@@ -174,7 +166,21 @@ class GraphDataset(object):
             use_degree = hasattr(batch[0], 'degree') and batch[0].degree is not None
             if use_degree:
                 deg = pad_sequence([g.degree for g in batch], batch_first=True, padding_value=0)
-        
+
+
+            #we perform the padding and stacking of these later, since we would need to transfer te zero padding 
+            #from cpu to gpu
+            # adj_matrices = pad_sequence([torch.nn.functional.pad(g.adj,[0,max_len-len(g.x)]) for g in batch], batch_first=True, padding_value=0)
+            # if use_pe:
+            #     if not batch[0].pe.is_sparse:               
+            #         # pos_enc = torch.stack([torch.nn.functional.pad(g.pe,[0,max_len-len(g.x),0,max_len-len(g.x)]) for g in batch],0)
+            #         pos_enc = pad_sequence([torch.nn.functional.pad(g.pe.transpose(0,1),[0,max_len-len(g.x)]) for g in batch], batch_first=True, padding_value=0).transpose(1,2)
+            #     else:
+            #         print("Not implemented yet!")
+            adj_matrices = [g.adj for g in batch]
+            if use_pe:
+                pos_enc = [g.pe for g in batch]
+            
             return padded_x, adj_matrices, mask, pos_enc, lap_pos_enc, deg, default_collate(labels)
         return collate
 

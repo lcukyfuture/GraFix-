@@ -17,12 +17,13 @@ from sklearn.model_selection import KFold
 import numpy as np
 from timeit import default_timer as timer
 from torch_geometric.transforms import OneHotDegree
+from torch.nn.utils.rnn import pad_sequence
 
 import csv
 import time 
 import argparse
 import copy
-from data_idx import SubgraphDataset, GraphDataset
+from data_idx2 import SubgraphDataset, GraphDataset
 from utils import compute_kernel_for_batch, save_kernel, load_kernel, count_parameters, compute_kernel_CPU, LapEncoding
 import pickle
 
@@ -91,17 +92,30 @@ def train(loader, model, warm_up, criterion, optimizer, lr_scheduler, epoch):
     mid_time = 0
     # with profiler.profile(use_cuda=True) as prof:
 
-    for i, (data, edge_index, mask, pe, lap, deg, labels) in enumerate(loader):
+    for i, batch in enumerate(loader):
+        
+        data, edge_index, mask, pe, lap, deg, labels = batch
+
+
+        
         # print("loadertime:", timer() - strat_time)
         labels = labels.view(-1)
         
         data = data.to(device)
-        edge_index = edge_index.to(device)
+        edge_index = [e.to(device) for e in edge_index]
         mask = mask.to(device)
-        pe = pe.to(device)
+        pe = [p.to(device) for p in pe]
+        
         if lap is not None:
             lap = lap.to(device)
         label = labels.to(device)
+
+        #finalizing padding and stacking of larger metrices
+        max_len = data.shape[1]
+        #pe is a list of nh x np x np
+        pe = pad_sequence([torch.nn.functional.pad(p.transpose(0,1),[0,max_len-p.shape[-1]]) for p in pe], batch_first=True, padding_value=0).transpose(1,2)
+        edge_index = pad_sequence([torch.nn.functional.pad(e,[0,max_len-e.shape[-1]]) for e in edge_index], batch_first=True, padding_value=0)
+        
         optimizer.zero_grad()
         #add kernel to model
 
@@ -143,14 +157,25 @@ def val(loader, model, criterion):
     val_nums = 0
     corr = 0
     with torch.no_grad():
-        for data, edge_index, mask, pe, lap, deg, labels in loader:
+        # for data, edge_index, mask, pe, lap, deg, labels in loader:
+     for i, batch in enumerate(loader):
+            
+            data, edge_index, mask, pe, lap, deg, labels = batch
+
             labels = labels.view(-1)
 
             size = len(data)
             data = data.to(device)
-            edge_index = edge_index.to(device)
+            edge_index = [e.to(device) for e in edge_index]
             mask = mask.to(device)
-            pe = pe.to(device)
+            pe = [p.to(device) for p in pe]
+        
+            #finalizing padding and stacking of larger metrices
+            max_len = data.shape[1]
+            #pe is a list of nh x np x np
+            pe = pad_sequence([torch.nn.functional.pad(p.transpose(0,1),[0,max_len-p.shape[-1]]) for p in pe], batch_first=True, padding_value=0).transpose(1,2)
+            edge_index = pad_sequence([torch.nn.functional.pad(e,[0,max_len-e.shape[-1]]) for e in edge_index], batch_first=True, padding_value=0)
+        
             if lap is not None:
                 lap = lap.to(device)
             label = labels.to(device)
