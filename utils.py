@@ -22,7 +22,7 @@ def compute_kernel_CPU(dataset, data, kernel_type, num_hops, WL_k, GL_k):
     elif kernel_type == 'WLSP':
         gk = WeisfeilerLehman(n_jobs = 32, normalize=True, base_graph_kernel=ShortestPath)
     elif kernel_type == 'GL':
-        gk = GraphletSampling(n_jobs=32, normalize=True, k=GL_k)
+        gk = GraphletSampling(n_jobs=32, normalize=True, k=int(GL_k))
     if dataset == 'AIDS':
         edge_index, _ = utils.add_self_loops(data.edge_index, num_nodes = data.num_nodes)
     else:

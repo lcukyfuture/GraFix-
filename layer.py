@@ -56,7 +56,7 @@ class SimplifiedAttention(nn.Module):
         
 
         attn_output = torch.einsum("bhij,bhjd->bhid", attn_output_weights, v_proj) 
-        print(timer()-t1)
+        # print(timer()-t1)
         #[bsz, num_heads, num_nodes, dim]
 
         attn_output = attn_output.permute(2, 0, 1, 3).reshape(tgt_len, bsz, embed_dim)

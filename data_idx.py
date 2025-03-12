@@ -7,6 +7,8 @@ from torch_geometric.data import Data
 import numpy as np
 import os
 
+from torch.nn.utils.rnn import pad_sequence
+
 def my_inc(self, key, value, *args, **kwargs):
     if key == 'subgraph_edge_index':
         return self.num_subgraph_nodes
@@ -107,18 +109,26 @@ class GraphDataset(object):
         self.nb_heads = nb_heads
 
 
+        #precompute dense adjacency matrices
+        max_len = max(len(g.x) for g in dataset)        
+        # self.full_adjs = [utils.to_dense_adj(g.edge_index, max_num_nodes=max_len)[0] for g in dataset]
+        self.adjs = [utils.to_dense_adj(g.edge_index, max_num_nodes=len(g.x))[0] for g in dataset]
+        self.dataset_len = len(dataset)
+
 
     def __len__(self):
-        return len(self.dataset)
+        return self.dataset_len
 
     def __getitem__(self, index):
         data = self.dataset[index]
-        if self.pe_list is not None and len(self.pe_list) == len(self.dataset):
-            data.pe = self.pe_list[index]
-        if self.lap_pe_list is not None and len(self.lap_pe_list) == len(self.dataset):
-            data.lap_pe = self.lap_pe_list[index]
-        if self.deg_list is not None and len(self.deg_list) == len(self.dataset):
+        if self.pe_list is not None and len(self.pe_list) == self.dataset_len:
+            data.pe = self.pe_list[index].float()
+        if self.lap_pe_list is not None and len(self.lap_pe_list) == self.dataset_len:
+            data.lap_pe = self.lap_pe_list[index].float()
+        if self.deg_list is not None and len(self.deg_list) == self.dataset_len:
             data.deg = self.deg_list[index]
+        # data.idx = index
+        data.adj = self.adjs[index]
         return data
     
     def compute_degree(self):
@@ -128,64 +138,42 @@ class GraphDataset(object):
             self.deg_list.append(deg)
 
 
-
-
-
     def collate_fn(self):
         def collate(batch):
-            batch = list(batch)
+            # batch = list(batch)
+            
             nb_heads = self.nb_heads
             max_len = max(len(g.x) for g in batch)
-            
-            padded_x = torch.zeros((len(batch), max_len, self.n_features))
-            adj_matrices = torch.zeros((len(batch), max_len, max_len))
 
-            mask = torch.zeros((len(batch), max_len), dtype=bool)
-            labels = []
-            adj_matrices = torch.zeros((len(batch), max_len, max_len))
+            padded_x = pad_sequence([g.x for g in batch], batch_first=True, padding_value=0)
+            
+            adj_matrices = pad_sequence([torch.nn.functional.pad(g.adj,[0,max_len-len(g.x)]) for g in batch], batch_first=True, padding_value=0)
+            mask =  pad_sequence([torch.zeros_like(g.x[:,0]) for g in batch], batch_first=True, padding_value=1).bool()
+            
+            labels = [g.y for g in batch]
+
+
             # TODO: check if position encoding matrix is sparse
             # if it's the case, use a huge sparse matrix
             # else use a dense tensor
             pos_enc = None
             use_pe = hasattr(batch[0], 'pe') and batch[0].pe is not None
             if use_pe:
-                if not batch[0].pe.is_sparse:
-                    pos_enc = torch.zeros((len(batch), nb_heads, max_len, max_len))
+                if not batch[0].pe.is_sparse:               
+                    # pos_enc = torch.stack([torch.nn.functional.pad(g.pe,[0,max_len-len(g.x),0,max_len-len(g.x)]) for g in batch],0)
+                    pos_enc = pad_sequence([torch.nn.functional.pad(g.pe.transpose(0,1),[0,max_len-len(g.x)]) for g in batch], batch_first=True, padding_value=0).transpose(1,2)
                 else:
                     print("Not implemented yet!")
 
             lap_pos_enc = None
             use_lap_pe = hasattr(batch[0], 'lap_pe') and batch[0].lap_pe is not None
             if use_lap_pe:
-                lap_pe_dim = batch[0].lap_pe.shape[-1]
-                lap_pos_enc = torch.zeros((len(batch), max_len, lap_pe_dim))
-            
+                lap_pos_enc = pad_sequence([g.lap_pe for g in batch], batch_first=True, padding_value=0)
+                
             deg = None
             use_degree = hasattr(batch[0], 'degree') and batch[0].degree is not None
             if use_degree:
-                deg = torch.zeros((len(batch), max_len))
-
-
-            for i, g in enumerate(batch):
-                labels.append(g.y)
-                g_len = len(g.x)
-
-                padded_x[i, :g_len, :] = g.x
-                adj = utils.to_dense_adj(g.edge_index, max_num_nodes=max_len)[0]
-                adj_matrices[i, :g_len, :g_len] = adj[:g_len, :g_len]
-
-                adj = utils.to_dense_adj(g.edge_index, max_num_nodes=max_len)[0]
-                adj_matrices[i, :g_len, :g_len] = adj[:g_len, :g_len]
-
-                mask[i, g_len:] = True
-                if use_pe:
-                    pos_enc[i, :nb_heads, :g_len, :g_len] = g.pe
-                if use_lap_pe:
-                    lap_pos_enc[i, :g_len, :g.lap_pe.shape[-1]] = g.lap_pe
-                if use_degree:
-                    deg[i, :g_len] = g.degree
-
-
+                deg = pad_sequence([g.degree for g in batch], batch_first=True, padding_value=0)
         
             return padded_x, adj_matrices, mask, pos_enc, lap_pos_enc, deg, default_collate(labels)
         return collate

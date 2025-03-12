@@ -1,7 +1,7 @@
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
+# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+# os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
 import torch
 
 import torch.nn as nn
@@ -216,7 +216,7 @@ def main():
     args = load_args()
     torch.manual_seed(44)
     np.random.seed(44)
-    data_path = '../dataset/TUDataset'
+    data_path = './dataset/TUDataset'
     dataset_name = args.dataset
     # torch.use_deterministic_algorithms(True)
     # dataset = datasets.TUDataset(data_path, dataset_name)
