@@ -23,21 +23,23 @@ import warnings
 from torch import nn
 
 class SimplifiedAttention(nn.Module):
-    def __init__(self, embed_dim, dropout_p=0.0, num_heads=1):
+    def __init__(self, embed_dim, dropout_p=0.0, num_heads=1, use_original_model=False):
         super(SimplifiedAttention, self).__init__()
         self.embed_dim = embed_dim
         self.dropout_p = dropout_p
         self.num_heads = num_heads
+        self.use_original_model = use_original_model
 
         self.in_proj_weight = nn.Parameter(torch.Tensor(embed_dim, embed_dim))
         self.in_proj_bias = nn.Parameter(torch.Tensor(embed_dim))
         self.out_proj_weight = nn.Parameter(torch.Tensor(embed_dim, embed_dim))
         self.out_proj_bias = nn.Parameter(torch.Tensor(embed_dim))
         
-        # [New] Parameters for gating mechanism
-        # We learn a scalar gate score to scale the kernel weight
-        self.gate_src = nn.Linear(embed_dim, num_heads)
-        self.gate_dst = nn.Linear(embed_dim, num_heads)
+        if not self.use_original_model:
+            # [New] Parameters for gating mechanism
+            # We learn a scalar gate score to scale the kernel weight
+            self.gate_src = nn.Linear(embed_dim, num_heads)
+            self.gate_dst = nn.Linear(embed_dim, num_heads)
         
         self.reset_parameters()
 
@@ -46,9 +48,10 @@ class SimplifiedAttention(nn.Module):
         nn.init.constant_(self.in_proj_bias, 0)
         nn.init.xavier_uniform_(self.out_proj_weight)
         nn.init.constant_(self.out_proj_bias, 0)
-        # [New] Initialize gate
-        nn.init.xavier_uniform_(self.gate_src.weight)
-        nn.init.xavier_uniform_(self.gate_dst.weight)
+        if not self.use_original_model:
+            # [New] Initialize gate
+            nn.init.xavier_uniform_(self.gate_src.weight)
+            nn.init.xavier_uniform_(self.gate_dst.weight)
 
     def forward(self, value, attn_output_weights, key_padding_mask=None, need_weights=None):
         tgt_len, bsz, embed_dim = value.size()
@@ -59,41 +62,46 @@ class SimplifiedAttention(nn.Module):
         v_proj = F.linear(value, self.in_proj_weight, self.in_proj_bias).view(tgt_len, bsz, self.num_heads, -1)
         v_proj = v_proj.permute(1, 2, 0, 3)  #[bsz, num_heads, num_node, dim]
 
-        # ============================================================
-        # [Core Modification] Kernel Modulation
-        # ============================================================
-        
-        # value shape: [num_nodes, bsz, dim] -> permute to [bsz, num_nodes, dim]
-        h = value.permute(1, 0, 2) 
-        
-        # Compute gate score for source and target nodes
-        # g_src: [bsz, num_nodes, num_heads]
-        g_src = self.gate_src(h)
-        g_dst = self.gate_dst(h)
-        
-        # Compute pairwise modulation coefficient
-        # We expect [bsz, num_heads, num_nodes, num_nodes]
-        # g_src.unsqueeze(2): [bsz, num_nodes, 1, num_heads]
-        # g_dst.unsqueeze(1): [bsz, 1, num_nodes, num_heads]
-        # Sum broadcasting: [bsz, num_nodes, num_nodes, num_heads]
-        gate_score = g_src.unsqueeze(2) + g_dst.unsqueeze(1)
-        
-        # Permute to [bsz, num_heads, num_nodes, num_nodes]
-        gate_score = gate_score.permute(0, 3, 1, 2)
-        
-        # Use Sigmoid to restrict it to (0, 1) as "pass rate"
-        # Or use Tanh + 1
-        modulation = torch.sigmoid(gate_score)
-        
-        # Modulate Kernel weights
-        # attn_output_weights is the fixed Kernel
-        # modulated_weights is the Kernel dynamically adjusted based on current features
-        modulated_weights = attn_output_weights * modulation
-        
-        # [Optional] Re-normalize modulated weights to ensure numerical stability
-        # modulated_weights = modulated_weights / (modulated_weights.sum(dim=-1, keepdim=True) + 1e-6)
+        if not self.use_original_model:
+            # ============================================================
+            # [Core Modification] Kernel Modulation
+            # ============================================================
+            
+            # value shape: [num_nodes, bsz, dim] -> permute to [bsz, num_nodes, dim]
+            h = value.permute(1, 0, 2) 
+            
+            # Compute gate score for source and target nodes
+            # g_src: [bsz, num_nodes, num_heads]
+            g_src = self.gate_src(h)
+            g_dst = self.gate_dst(h)
+            
+            # Compute pairwise modulation coefficient
+            # We expect [bsz, num_heads, num_nodes, num_nodes]
+            # g_src.unsqueeze(2): [bsz, num_nodes, 1, num_heads]
+            # g_dst.unsqueeze(1): [bsz, 1, num_nodes, num_heads]
+            # Sum broadcasting: [bsz, num_nodes, num_nodes, num_heads]
+            gate_score = g_src.unsqueeze(2) + g_dst.unsqueeze(1)
+            
+            # Permute to [bsz, num_heads, num_nodes, num_nodes]
+            gate_score = gate_score.permute(0, 3, 1, 2)
+            
+            # Use Sigmoid to restrict it to (0, 1) as "pass rate"
+            # Or use Tanh + 1
+            modulation = torch.sigmoid(gate_score)
+            
+            # Modulate Kernel weights
+            # attn_output_weights is the fixed Kernel
+            # modulated_weights is the Kernel dynamically adjusted based on current features
+            modulated_weights = attn_output_weights * modulation
+            
+            # [Required] Re-normalize modulated weights to ensure numerical stability
+            # This makes the aggregation a weighted average, similar to Softmax in standard Transformers
+            modulated_weights = modulated_weights / (modulated_weights.sum(dim=-1, keepdim=True) + 1e-6)
 
-        # ============================================================
+            # ============================================================
+        else:
+            # Also normalize the original kernel weights for the original model
+            modulated_weights = attn_output_weights / (attn_output_weights.sum(dim=-1, keepdim=True) + 1e-6)
 
         # 2. Aggregate using modulated weights
         attn_output = torch.einsum("bhij,bhjd->bhid", modulated_weights, v_proj) 
@@ -112,12 +120,12 @@ class SimplifiedAttention(nn.Module):
 
 class DiffTransformerEncoderLayer(nn.TransformerEncoderLayer):
     def __init__(self, d_model, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", batch_norm=True, nb_heads=1):
+                 activation="relu", batch_norm=True, nb_heads=1, use_original_model=False):
         super().__init__(d_model, nhead=nb_heads,  # nhead is set to 1 as it's unused in SimplifiedAttention
                          dim_feedforward=dim_feedforward, dropout=dropout, activation=activation)
         self.n_heads = nb_heads
 
-        self.self_attn = SimplifiedAttention(d_model, num_heads=self.n_heads)
+        self.self_attn = SimplifiedAttention(d_model, num_heads=self.n_heads, use_original_model=use_original_model)
         self.self_attn.batch_first = False  
         self.self_attn._qkv_same_embed_dim = True  
         self.batch_norm = batch_norm

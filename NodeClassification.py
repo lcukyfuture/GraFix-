@@ -8,7 +8,7 @@ from torch_geometric import datasets
 from torch_geometric.data import Data
 from torch_geometric.utils import to_dense_adj, degree
 import torch.nn.functional as F
-from model_node import GraphTransformerNode
+from cachemodel_node import GraphTransformerNode
 import matplotlib.pyplot as plt
 import numpy as np
 from timeit import default_timer as timer
@@ -25,7 +25,7 @@ def load_args():
                                    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('--dataset', type=str, default='PubMed', 
-                       choices=['Cora', 'CiteSeer', 'PubMed'],
+                       choices=['Cora', 'CiteSeer', 'PubMed', 'Cornell'],
                        help='Dataset to use')
     parser.add_argument('--num-layers', type=int, default=1, help="number of layers")
     parser.add_argument('--hop', type=int, default=2, help='Hop for subgraph extraction')
@@ -54,6 +54,10 @@ def load_args():
     parser.add_argument('--wl', type=int, default=3, help='WL iteration')
     parser.add_argument('--batch-norm', action='store_true', 
                        help='use batch norm instead of layer norm')
+    parser.add_argument('--ablation-no-kernel', action='store_true',
+                       help='Ablation study: Set kernel matrix to all ones to discard structural prior')
+    parser.add_argument('--original-model', action='store_true',
+                       help='Use the original model without adjacency fusion and gating mechanism')
     args = parser.parse_args()
     
     if args.outdir != '':
@@ -272,8 +276,8 @@ def plot_curve(train_loss_list, test_loss_list, train_acc_list, test_acc_list, o
 
 def main():
     args = load_args()
-    torch.manual_seed(2025)
-    np.random.seed(2025)
+    torch.manual_seed(42)
+    np.random.seed(42)
 
     
     # Load dataset
@@ -284,19 +288,60 @@ def main():
         dataset = datasets.Planetoid(root=data_path, name='CiteSeer')
     elif args.dataset == 'PubMed':
         dataset = datasets.Planetoid(root=data_path, name='PubMed')
+    elif args.dataset == 'Cornell':
+        dataset = datasets.WebKB(root=data_path, name='Cornell')
     
     data = dataset[0]
     num_classes = dataset.num_classes
+    
+    # Handle multiple masks (e.g., in WebKB datasets like Cornell)
+    if hasattr(data, 'train_mask') and data.train_mask.dim() > 1:
+        data.train_mask = data.train_mask[:, 0]
+        data.val_mask = data.val_mask[:, 0]
+        data.test_mask = data.test_mask[:, 0]
     
     print(f"Dataset: {args.dataset}")
     print(f"Number of nodes: {data.num_nodes}")
     print(f"Number of features: {data.num_features}")
     print(f"Number of classes: {num_classes}")
     
+    # [Mod] Feature Clustering for WL Kernel (Only for original model as requested)
+    if args.original_model:
+        print("\n!!! Applying Feature Clustering for Kernel Computation (Original Model) !!!")
+        print("This discretizes high-dimensional features to help WL kernel learn meaningful similarities.")
+        from sklearn.cluster import MiniBatchKMeans
+        
+        # Adjust clusters based on dataset characteristics
+        if args.dataset == 'PubMed':
+            n_clusters = 500  # Larger dataset, more clusters
+        elif args.dataset in ['Cora', 'CiteSeer']:
+            n_clusters = 128  # Medium size, balance granularity
+        else:
+            n_clusters = 50   # Small datasets like Cornell
+            
+        print(f"Clustering features into {n_clusters} clusters...")
+        
+        # CPU clustering - normalize features before clustering to improve KMeans
+        from sklearn.preprocessing import normalize
+        features_np = data.x.cpu().numpy()
+        features_norm = normalize(features_np, axis=1)
+        kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=256, n_init='auto')
+        clusters = kmeans.fit_predict(features_norm)
+        
+        # Convert to One-Hot Tensor
+        cluster_features = torch.zeros(data.num_nodes, n_clusters)
+        cluster_features.scatter_(1, torch.tensor(clusters).unsqueeze(1), 1.0)
+        
+        # Create a temporary data object with clustered features
+        data_for_kernel = copy.copy(data)
+        data_for_kernel.x = cluster_features
+    else:
+        data_for_kernel = data
+
     # Extract node subgraphs
     print(f"Extracting {args.hop}-hop subgraphs for each node...")
-    node_subgraphs = extract_node_subgraphs(data, hop=args.hop)
-    
+    node_subgraphs_for_kernel = extract_node_subgraphs(data_for_kernel, hop=args.hop)
+
     # Compute kernels for all node subgraphs
     if not os.path.exists("cache/pe_node/{}".format(args.dataset)):
         try:
@@ -309,18 +354,36 @@ def main():
         kernel_type = args.kernels[head]
         wl = args.wl if kernel_type == 'WL' else None
         gl = args.GL_k if kernel_type == 'GL' else None
-        kernel_cache_path = 'cache/pe_node/{}/{}_{}_{}_{}.pkl'.format(
-            args.dataset, kernel_type, wl, gl, args.hop)
+        
+        # Append _clustered to cache filename if using clustered features
+        # Include n_clusters in suffix to avoid cache conflicts
+        if args.original_model:
+            # Re-calculate n_clusters for cache path consistency
+            if args.dataset == 'PubMed':
+                n_clusters = 500
+            elif args.dataset in ['Cora', 'CiteSeer']:
+                n_clusters = 128
+            else:
+                n_clusters = 50
+            cache_suffix = f"_clustered_{n_clusters}"
+        else:
+            cache_suffix = ""
+            
+        kernel_cache_path = 'cache/pe_node/{}/{}_{}_{}_{}{}.pkl'.format(
+            args.dataset, kernel_type, wl, gl, args.hop, cache_suffix)
         
         node_kernels = load_kernel(kernel_cache_path)
         
         if node_kernels is None:
             print(f"\n=== Computing {kernel_type} kernel (head {head+1}/{args.numheads}) ===")
             # Use the utility function to compute kernel matrix
-            node_kernels = compute_node_kernel_CPU(node_subgraphs, kernel_type, wl, gl)
+            # Use node_subgraphs_for_kernel (which might have clustered features)
+            node_kernels = compute_node_kernel_CPU(node_subgraphs_for_kernel, kernel_type, wl, gl)
             save_kernel(node_kernels, kernel_cache_path)
         else:
             print(f"Loaded cached {kernel_type} kernel (head {head+1}/{args.numheads})")
+            if args.original_model:
+                print("(Note: This kernel was computed using clustered features)")
         
         all_kernel_results.append(node_kernels)
     
@@ -330,14 +393,22 @@ def main():
     else:
         pe_matrix = torch.stack([torch.tensor(all_kernel_results[h], dtype=torch.float) 
                                 for h in range(args.numheads)])
-    
-    # Row-wise Sum Normalization
-    row_sum = pe_matrix.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-    pe_matrix = pe_matrix / row_sum
-    
-    # Max Normalization
-    # max_val = pe_matrix.flatten(start_dim=-2).max(dim=-1)[0].view(*pe_matrix.shape[:-2], 1, 1)
-    # pe_matrix = pe_matrix / (max_val + 1e-6)
+
+    # Ablation study: Discard structural prior
+    if args.ablation_no_kernel:
+        print("!!! ABLATION STUDY: Discarding structural prior (Setting Kernel = 1) !!!")
+        pe_matrix = torch.ones_like(pe_matrix)
+
+    # [Mod] Normalize Kernel Matrix
+    # This step ensures kernel values are within a reasonable range [0, 1]
+    # It helps with numerical stability and prevents gradient issues.
+    print("Normalizing Kernel Matrix...")
+    if pe_matrix.dim() == 3: # (num_heads, num_nodes, num_nodes)
+        # Max normalization per head
+        max_val = pe_matrix.flatten(start_dim=-2).max(dim=-1)[0].view(-1, 1, 1)
+        pe_matrix = pe_matrix / (max_val + 1e-6)
+    else: # (num_nodes, num_nodes)
+        pe_matrix = pe_matrix / (pe_matrix.max() + 1e-6)
 
     # All node features
     all_node_features = data.x
@@ -386,7 +457,8 @@ def main():
                             lap_pos=args.lappe,
                             lap_pos_dim=args.lap_dim,
                             nb_heads=args.numheads,
-                            GNN=args.isgnn).to(device)
+                            GNN=args.isgnn,
+                            use_original_model=args.original_model).to(device)
     
     print("Total number of parameters: {}".format(count_parameters(model)))
     

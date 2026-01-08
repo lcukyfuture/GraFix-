@@ -3,7 +3,7 @@ import torch
 from torch import nn
 import torch_geometric.nn as gnn
 from torch_geometric.nn import DenseGraphConv, DenseGINConv, DenseSAGEConv, DenseGATConv
-from layer_node import DiffTransformerEncoderLayer
+from cachelayer import DiffTransformerEncoderLayer
 
 
 class DiffTransformerEncoder(nn.TransformerEncoder):
@@ -28,13 +28,14 @@ class GraphTransformerNode(nn.Module):
     """
     def __init__(self, in_size, nb_class, d_model,
                  dim_feedforward=512, dropout=0.1, nb_layers=4,
-                 batch_norm=False, lap_pos=False, lap_pos_dim=0, nb_heads=1, GNN=None):
+                 batch_norm=False, lap_pos=False, lap_pos_dim=0, nb_heads=1, GNN=None, use_original_model=False):
         super(GraphTransformerNode, self).__init__()
 
         self.GNN = GNN
         self.lap_pos = lap_pos
         self.lap_pos_dim = lap_pos_dim
         self.nb_heads = nb_heads
+        self.use_original_model = use_original_model
         
         if self.lap_pos and lap_pos_dim > 0:
             self.embedding_lap_pos = nn.Linear(lap_pos_dim, d_model)
@@ -53,7 +54,7 @@ class GraphTransformerNode(nn.Module):
         
         # Transformer encoder layers
         encoder_layer = DiffTransformerEncoderLayer(
-                d_model, dim_feedforward, dropout, batch_norm=batch_norm, nb_heads=nb_heads)
+                d_model, dim_feedforward, dropout, batch_norm=batch_norm, nb_heads=nb_heads, use_original_model=use_original_model)
         self.encoder = DiffTransformerEncoder(encoder_layer, nb_layers)
         
         # Classifier for each node (no pooling)
@@ -83,7 +84,6 @@ class GraphTransformerNode(nn.Module):
             x = x.permute(1, 0, 2)
             output = self.embedding(x)  # (num_nodes, batch_size, d_model)
         else:
-            print("Using GNN for initial node embedding")
             # GNN expects (batch_size, num_nodes, in_size) and adj
             output = self.embedding(x, edge_index)
             # Permute to transformer convention after GNN
@@ -98,7 +98,7 @@ class GraphTransformerNode(nn.Module):
         # ============================================================
         # Fuse Adjacency Matrix into PE (Kernel) to incorporate local connectivity
         # ============================================================
-        if edge_index is not None:
+        if not self.use_original_model and edge_index is not None:
             # edge_index is passed as Dense Adjacency Matrix: [Batch, N, N]
             adj = edge_index.clone()
             
