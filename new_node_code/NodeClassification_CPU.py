@@ -36,8 +36,10 @@ def load_args():
                                    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('--dataset', type=str, default='PubMed', 
-                       choices=['Cora', 'CiteSeer', 'PubMed', 'Cornell'],
+                       choices=['Cora', 'CiteSeer', 'PubMed', 'Cornell', 'Texas', 'Wisconsin'],
                        help='Dataset to use')
+    parser.add_argument('--split-index', type=int, default=0,
+                       help='Split column to use for WebKB multi-split masks.')
     parser.add_argument('--num-layers', type=int, default=1, help="number of layers")
     parser.add_argument('--hop', type=int, default=2, help='Hop for subgraph extraction')
     parser.add_argument('--hops', nargs='+', type=int, default=None, 
@@ -234,6 +236,38 @@ def extract_node_subgraphs(data, hop=2):
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def select_split_masks(data, split_index):
+    """Select one official split from PyG multi-split masks."""
+    required_masks = ('train_mask', 'val_mask', 'test_mask')
+    if not all(hasattr(data, mask_name) for mask_name in required_masks):
+        raise ValueError('Dataset does not provide train/val/test masks.')
+
+    train_mask = data.train_mask
+    if train_mask.dim() <= 1:
+        if split_index != 0:
+            raise ValueError(
+                f'--split-index {split_index} was requested, but this dataset only has one split.'
+            )
+        return data
+
+    num_splits = train_mask.size(1)
+    if split_index < 0 or split_index >= num_splits:
+        raise ValueError(
+            f'--split-index {split_index} is out of range for this dataset; '
+            f'valid split indices are 0..{num_splits - 1}.'
+        )
+
+    for mask_name in required_masks:
+        mask = getattr(data, mask_name)
+        if mask.dim() != 2 or mask.size(1) != num_splits:
+            raise ValueError(
+                f'{mask_name} has shape {tuple(mask.shape)}, expected a 2D mask '
+                f'with {num_splits} split columns.'
+            )
+        setattr(data, mask_name, mask[:, split_index])
+    return data
 
 
 def train(loader, model, criterion, optimizer):
@@ -687,19 +721,15 @@ def main():
         dataset = datasets.Planetoid(root=data_path, name='CiteSeer')
     elif args.dataset == 'PubMed':
         dataset = datasets.Planetoid(root=data_path, name='PubMed')
-    elif args.dataset == 'Cornell':
-        dataset = datasets.WebKB(root=data_path, name='Cornell')
+    elif args.dataset in ['Cornell', 'Texas', 'Wisconsin']:
+        dataset = datasets.WebKB(root=data_path, name=args.dataset)
     
     data = dataset[0]
     num_classes = dataset.num_classes
-    
-    # Handle multiple masks (e.g., in WebKB datasets like Cornell)
-    if hasattr(data, 'train_mask') and data.train_mask.dim() > 1:
-        data.train_mask = data.train_mask[:, 0]
-        data.val_mask = data.val_mask[:, 0]
-        data.test_mask = data.test_mask[:, 0]
+    data = select_split_masks(data, args.split_index)
     
     print(f"Dataset: {args.dataset}")
+    print(f"Split index: {args.split_index}")
     print(f"Number of nodes: {data.num_nodes}")
     print(f"Number of features: {data.num_features}")
     print(f"Number of classes: {num_classes}")
@@ -710,6 +740,9 @@ def main():
     }
     print(f"Model type: {gate_mode_labels[gate_mode]}")
     print(f"Clustered kernel features: {args.cluster_wl_features}")
+    print(f"Training nodes: {data.train_mask.sum().item()}")
+    print(f"Validation nodes: {data.val_mask.sum().item()}")
+    print(f"Test nodes: {data.test_mask.sum().item()}")
     
     # Optionally cluster features before kernel computation.
     if args.cluster_wl_features:
